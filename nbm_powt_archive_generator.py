@@ -215,7 +215,7 @@ class NBMGribFetcher:
         os.makedirs(self.save_dir, exist_ok=True)
 
         output_file = (self.save_dir +
-                       f"{yyyymmdd}.t{hh}z.fhr{aws_request['fhr']:03d}.{aws_request['element']}.grib2")
+                       f"/{yyyymmdd}.t{hh}z.fhr{aws_request['fhr']:03d}.{aws_request['element']}.grib2")
 
         if os.path.isfile(output_file):
             self.produced_files.append(output_file)
@@ -470,24 +470,24 @@ def grib_indexer(df, grib_files):
 
 def process_grib_files(df, grib_file):
 
-    nbm = pygrib.open(grib_file)
+    with pygrib.open(grib_file) as nbm:
+        print(f"Processing: {grib_file}")
 
-    for idx, msg in enumerate(nbm):
-        name = relabel_grib_message(msg)
+        for idx, msg in enumerate(nbm):
+            name = relabel_grib_message(msg)
 
-        if name not in df.columns:
-            df[name] = np.nan
+            if name not in df.columns:
+                df[name] = np.nan
 
-        extract_nbm_index_mapped = partial(extract_nbm_index, nbm_data=msg.values)
+            extract_nbm_index_mapped = partial(extract_nbm_index, nbm_data=msg.values)
 
-        valid_date = msg.validDate
-        if valid_date in df.index.get_level_values('timestamp'):
-            df.loc[valid_date, name] = df.loc[valid_date]['grib_index'].apply(
-                extract_nbm_index_mapped
-            ).values
-
-    nbm.close()
-
+            valid_date = msg.validDate
+            if valid_date in df.index.get_level_values('timestamp'):
+                df.loc[valid_date, name] = df.loc[valid_date]['grib_index'].apply(
+                    extract_nbm_index_mapped
+                ).values
+    
+    gc.collect()
     return df
 
 if __name__ == "__main__":
@@ -527,15 +527,20 @@ if __name__ == "__main__":
     fetcher = NBMGribFetcher(aws_bucket_nbm, element, nbm_set, nbm_area, query_vars, nbm_dir)
     nbm_files = fetcher.fetch_for_init_times(init_times, fhr)
     
-    nbm_files = sorted(nbm_files)[:10]  # Limit 
+    nbm_files = sorted(nbm_files)#[:10]  # Limit
 
     print(f"{len(nbm_files)} NBM GRIB files to process.")
 
     grib_index = grib_indexer(obs, nbm_files)
     obs = obs.join(grib_index[['grib_index', 'grib_lat', 'grib_lon']], on='stid')
 
-    processed_df = [process_grib_files(obs, f) for f in nbm_files]
-    processed_df = pd.concat(processed_df, axis=0)
+    for nbm_file in nbm_files:
+        obs = process_grib_files(obs, nbm_file)
+
+    processed_df = obs
+
+    # processed_df = [process_grib_files(obs, f) for f in nbm_files]
+    # processed_df = pd.concat(processed_df, axis=0)
 
     # Rename columns based on the mapping
     processed_df.rename(columns=column_rename_mapping, inplace=True)
