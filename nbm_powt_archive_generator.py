@@ -1,5 +1,5 @@
 # Standard library imports
-import os
+import os, gc
 import pygrib
 import swifter
 import time
