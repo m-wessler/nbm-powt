@@ -43,8 +43,8 @@ print(f'Process Pool Size: {mp_workers}')
 # Pandas IndexSlice
 idx = pd.IndexSlice
 
-output_dir = mkdir_p('/data/powt/nbm/')
-nbm_dir = mkdir_p('/data/powt/nbm_grib2/')
+output_dir = mkdir_p('/data/powt/nbm')
+nbm_dir = mkdir_p('/data/powt/nbm_grib2')
 
 aws_bucket_nbm = 'noaa-nbm-grib2-pds'
 nbm_set = 'core'
@@ -199,7 +199,7 @@ def create_init_times(start_date, end_date, frequency):
     return init_times
 
 class NBMGribFetcher:
-    def __init__(self, aws_bucket, element, nbm_set, nbm_area, query_vars, save_dir='./nbm_grib2/'):
+    def __init__(self, aws_bucket, element, nbm_set, nbm_area, query_vars, save_dir):
         self.aws_bucket = aws_bucket
         self.element = element
         self.nbm_set = nbm_set
@@ -350,13 +350,6 @@ def ll_to_index(lat, lon, datalats, datalons):
     dist = np.sqrt((datalats - lat)**2 + (datalons - lon)**2)
     return np.unravel_index(np.argmin(dist), datalats.shape)
 
-def extract_nbm_value(index, nbm_data):
-    """
-    Extract the value from the GRIB data at the specified index (y, x).
-    """
-    y, x = index
-    return nbm_data[y, x]
-
 def relabel_grib_message(grb):
     """
     Relabel a GRIB message to create a human-readable column name.
@@ -396,69 +389,6 @@ def relabel_grib_message(grb):
 
     return label
 
-def process_grib_files(df, grib_files):
-    """
-    Process GRIB files dynamically to extract relevant grid point values for the DataFrame.
-    """
-    for grib_file in grib_files:
-        if os.path.isfile(grib_file):
-            print(f"Processing GRIB file: {grib_file}")
-            nbm = pygrib.open(grib_file)
-
-            # If not yet indexed, create grib_index for matching grid points
-            if 'grib_index' not in df.columns:
-                # print("Creating grib_index for latitude/longitude points.")
-                nbmlats, nbmlons = nbm.message(1).latlons()
-                # print(f"GRIB file lat/lon grid shape: {nbmlats.shape}")
-
-                df_indexed = df.reset_index()[['stid', 'latitude', 'longitude']].drop_duplicates()
-
-                ll_to_index_mapped = partial(ll_to_index, datalats=nbmlats, datalons=nbmlons)
-
-                df_indexed['grib_index'] = df_indexed.swifter.apply(
-                    lambda x: ll_to_index_mapped(x.latitude, x.longitude), axis=1
-                )
-                # print("grib_index creation complete.")
-
-                # Extract the grid lat/lon for validation
-                extract_nbm_lats_mapped = partial(extract_nbm_value, nbm_data=nbmlats)
-                extract_nbm_lons_mapped = partial(extract_nbm_value, nbm_data=nbmlons)
-
-                df_indexed['grib_lat'] = df_indexed['grib_index'].apply(extract_nbm_lats_mapped)
-                df_indexed['grib_lon'] = df_indexed['grib_index'].apply(extract_nbm_lons_mapped)
-
-                df_indexed.set_index('stid', inplace=True)
-
-                df = df.reset_index().join(
-                    df_indexed[['grib_index', 'grib_lat', 'grib_lon']], on='stid'
-                ).set_index(['timestamp', 'stid']).sort_index()
-                # print("Updated DataFrame with grib_index, grib_lat, and grib_lon.")
-
-            # Process GRIB messages dynamically
-            for idx, msg in enumerate(nbm):
-                # print(f"Processing message {idx + 1}: {msg.shortName}, validDate: {msg.validDate}")
-                name = relabel_grib_message(msg)
-                # print(f"Relabeled message to column: {name}")
-
-                if name not in df.columns:
-                    df[name] = np.nan
-                    # print(f"Added new column: {name}")
-
-                extract_nbm_value_mapped = partial(extract_nbm_value, nbm_data=msg.values)
-
-                valid_date = msg.validDate
-                if valid_date in df.index.get_level_values('timestamp'):
-                    df.loc[valid_date, name] = df.loc[valid_date]['grib_index'].apply(
-                        extract_nbm_value_mapped
-                    ).values
-                    # print(f"Filled data for column: {name}, validDate: {valid_date}")
-
-            nbm.close()
-        else:
-            print(f"GRIB file not found: {grib_file}")
-
-    return df
-
 def convert_kelvin_to_fahrenheit(df, columns):
     """
     Convert the specified columns from Kelvin to Fahrenheit.
@@ -496,10 +426,74 @@ def calculate_wet_bulb_temperature(T, RH):
     T_w_fahrenheit = T_w_celsius * 9.0 / 5.0 + 32
     return round(T_w_fahrenheit, 2)
 
+def extract_nbm_index(index, nbm_data):
+
+    y, x = index
+    return nbm_data[y, x]
+
+def grib_indexer(df, grib_files):
+    """
+    Process GRIB files dynamically to extract relevant grid point values for the DataFrame.
+    """
+    for grib_file in grib_files:
+        if os.path.isfile(grib_file):
+            print(f"Generating index from GRIB file: {grib_file}")
+            nbm = pygrib.open(grib_file)
+
+            # If not yet indexed, create grib_index for matching grid points
+            if 'grib_index' not in df.columns:
+                # print("Creating grib_index for latitude/longitude points.")
+                nbmlats, nbmlons = nbm.message(1).latlons()
+                # print(f"GRIB file lat/lon grid shape: {nbmlats.shape}")
+
+                df_indexed = df.reset_index()[['stid', 'latitude', 'longitude']].drop_duplicates()
+
+                ll_to_index_mapped = partial(ll_to_index, datalats=nbmlats, datalons=nbmlons)
+
+                df_indexed['grib_index'] = df_indexed.swifter.apply(
+                    lambda x: ll_to_index_mapped(x.latitude, x.longitude), axis=1)
+
+                # Extract the grid lat/lon for validation
+                extract_nbm_lats_mapped = partial(extract_nbm_index, nbm_data=nbmlats)
+                extract_nbm_lons_mapped = partial(extract_nbm_index, nbm_data=nbmlons)
+
+                df_indexed['grib_lat'] = df_indexed['grib_index'].apply(extract_nbm_lats_mapped)
+                df_indexed['grib_lon'] = df_indexed['grib_index'].apply(extract_nbm_lons_mapped)
+
+                df_indexed.set_index('stid', inplace=True)
+
+                return df_indexed
+        else:
+            print(f"GRIB file not found: {grib_file}")
+
+    return df
+
+def process_grib_files(df, grib_file):
+
+    nbm = pygrib.open(grib_file)
+
+    for idx, msg in enumerate(nbm):
+        name = relabel_grib_message(msg)
+
+        if name not in df.columns:
+            df[name] = np.nan
+
+        extract_nbm_index_mapped = partial(extract_nbm_index, nbm_data=msg.values)
+
+        valid_date = msg.validDate
+        if valid_date in df.index.get_level_values('timestamp'):
+            df.loc[valid_date, name] = df.loc[valid_date]['grib_index'].apply(
+                extract_nbm_index_mapped
+            ).values
+
+    nbm.close()
+
+    return df
+
 if __name__ == "__main__":
 
-    start_date = "2023-01-19" 
-    end_date = "2023-06-01" 
+    start_date = "2024-10-01" 
+    end_date = "2025-04-28" 
 
     # Convert user input to datetime objects
     start_date, end_date = [datetime.strptime(date+' 0000', '%Y-%m-%d %H%M')
@@ -532,10 +526,16 @@ if __name__ == "__main__":
 
     fetcher = NBMGribFetcher(aws_bucket_nbm, element, nbm_set, nbm_area, query_vars, nbm_dir)
     nbm_files = fetcher.fetch_for_init_times(init_times, fhr)
-    nbm_files = sorted(nbm_files) #[:25]  # Limit to the first 25 files
+    
+    nbm_files = sorted(nbm_files)[:10]  # Limit 
 
-    # Process NBM GRIB files
-    processed_df = process_grib_files(obs, nbm_files)
+    print(f"{len(nbm_files)} NBM GRIB files to process.")
+
+    grib_index = grib_indexer(obs, nbm_files)
+    obs = obs.join(grib_index[['grib_index', 'grib_lat', 'grib_lon']], on='stid')
+
+    processed_df = [process_grib_files(obs, f) for f in nbm_files]
+    processed_df = pd.concat(processed_df, axis=0)
 
     # Rename columns based on the mapping
     processed_df.rename(columns=column_rename_mapping, inplace=True)
@@ -548,7 +548,7 @@ if __name__ == "__main__":
     processed_df['snowlvl'] = processed_df['snowlvl'] * 3.28084 # m to ft
 
     subset = processed_df[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'PRA', 'PZR', 'PSN', 'PPL']]
-    
+
     # Must drop NA before applying the Tw function
     subset.dropna(how='any', inplace=True)
 
