@@ -28,6 +28,15 @@ import requests
 import itertools
 from pydantic import BaseModel, Field
 
+import logging
+
+# Configure logging
+logging.basicConfig(
+    filename='./23_23_process_grib_files.log',
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
 def mkdir_p(check_dir):
     from pathlib import Path
     Path(check_dir).mkdir(parents=True, exist_ok=True)
@@ -468,32 +477,85 @@ def grib_indexer(df, grib_files):
 
     return df
 
-def process_grib_files(df, grib_file):
+# def process_grib_files(df, grib_file):
 
-    with pygrib.open(grib_file) as nbm:
-        print(f"Processing: {grib_file}")
+#     with pygrib.open(grib_file) as nbm:
+#         print(f"Processing: {grib_file}")
 
-        for idx, msg in enumerate(nbm):
-            name = relabel_grib_message(msg)
+#         for idx, msg in enumerate(nbm):
+#             name = relabel_grib_message(msg)
 
-            if name not in df.columns:
-                df[name] = np.nan
+#             if name not in df.columns:
+#                 df[name] = np.nan
 
-            extract_nbm_index_mapped = partial(extract_nbm_index, nbm_data=msg.values)
+#             extract_nbm_index_mapped = partial(extract_nbm_index, nbm_data=msg.values)
 
-            valid_date = msg.validDate
-            if valid_date in df.index.get_level_values('timestamp'):
-                df.loc[valid_date, name] = df.loc[valid_date]['grib_index'].apply(
-                    extract_nbm_index_mapped
-                ).values
+#             valid_date = msg.validDate
+#             if valid_date in df.index.get_level_values('timestamp'):
+#                 df.loc[valid_date, name] = df.loc[valid_date]['grib_index'].apply(
+#                     extract_nbm_index_mapped
+#                 ).values
     
-    gc.collect()
-    return df
+#     gc.collect()
+#     return df
+
+def process_grib_files(df, grib_file):
+    logging.info("Entered process_grib_files function.")
+    logging.debug(f"Input DataFrame columns: {df.columns}")
+    logging.debug(f"Input DataFrame index: {df.index}")
+    logging.debug(f"GRIB file to process: {grib_file}")
+
+    try:
+        with pygrib.open(grib_file) as nbm:
+            logging.info(f"Successfully opened GRIB file: {grib_file}")
+            
+            for idx, msg in enumerate(nbm):
+                logging.debug(f"Processing GRIB message #{idx}. Message details: {msg}")
+
+                try:
+                    name = relabel_grib_message(msg)
+                    logging.debug(f"GRIB message relabeled to: {name}")
+                except Exception as e:
+                    logging.error(f"Error relabeling GRIB message #{idx}: {e}")
+                    raise
+
+                if name not in df.columns:
+                    logging.debug(f"Column '{name}' not in DataFrame. Adding column with NaN values.")
+                    df[name] = np.nan
+
+                extract_nbm_index_mapped = partial(extract_nbm_index, nbm_data=msg.values)
+                logging.debug(f"Partial function created for extract_nbm_index with GRIB message values.")
+
+                valid_date = msg.validDate
+                logging.debug(f"Valid date of GRIB message: {valid_date}")
+
+                if valid_date in df.index.get_level_values('timestamp'):
+                    logging.debug(f"Valid date {valid_date} found in DataFrame index.")
+                    try:
+                        df.loc[valid_date, name] = df.loc[valid_date]['grib_index'].apply(
+                            extract_nbm_index_mapped
+                        ).values
+                        logging.debug(f"Updated DataFrame at valid date {valid_date} for column {name}.")
+                    except Exception as e:
+                        logging.error(f"Error applying extract_nbm_index_mapped for valid date {valid_date}: {e}")
+                        raise
+                else:
+                    logging.warning(f"Valid date {valid_date} not found in DataFrame index.")
+
+    except Exception as e:
+        logging.critical(f"Critical error encountered when processing GRIB file {grib_file}: {e}")
+        raise
+    finally:
+        gc.collect()
+        logging.info("Garbage collection invoked.")
+
+    logging.info("Exiting process_grib_files function.")
+    return (df, grib_file)
 
 if __name__ == "__main__":
 
-    start_date = "2024-10-01" 
-    end_date = "2025-04-28" 
+    start_date = "2023-01-19" 
+    end_date = "2023-06-01" 
 
     # Convert user input to datetime objects
     start_date, end_date = [datetime.strptime(date+' 0000', '%Y-%m-%d %H%M')
@@ -527,42 +589,132 @@ if __name__ == "__main__":
     fetcher = NBMGribFetcher(aws_bucket_nbm, element, nbm_set, nbm_area, query_vars, nbm_dir)
     nbm_files = fetcher.fetch_for_init_times(init_times, fhr)
     
-    nbm_files = sorted(nbm_files)#[:10]  # Limit
+    nbm_files = sorted(nbm_files)#[:24]  # Limit
 
     print(f"{len(nbm_files)} NBM GRIB files to process.")
 
     grib_index = grib_indexer(obs, nbm_files)
     obs = obs.join(grib_index[['grib_index', 'grib_lat', 'grib_lon']], on='stid')
 
-    for nbm_file in nbm_files:
-        obs = process_grib_files(obs, nbm_file)
+    # for nbm_file in nbm_files:
+    #     obs, last_processed = process_grib_files(obs, nbm_file)
+
+    while len(nbm_files) > 0:
+        # Take the next file from the list
+        nbm_file = nbm_files[0]
+        
+        try:
+            # Call your function to process the file
+            obs, processed_file = process_grib_files(obs, nbm_file)
+            
+            # Remove the processed file from the list
+            nbm_files.pop(0)  # Remove the first file
+            
+            # Optionally log or use the returned data
+            logging.info(f"Processed: {processed_file}")
+            logging.info(f"{len(nbm_files)} files remaining to process.")
+    
+        except Exception as e:
+            # Handle errors gracefully
+            logging.error(f"Error processing {nbm_file}: {e}")
+        
+            # Optionally remove the file to avoid retrying it
+            nbm_files.pop(0)
+
+    temp_file = f"{output_dir}/{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-nbm-obs.TEMP.csv"
+    obs.to_csv(temp_file, index=True)
 
     processed_df = obs
 
-    # processed_df = [process_grib_files(obs, f) for f in nbm_files]
-    # processed_df = pd.concat(processed_df, axis=0)
+    # # processed_df = [process_grib_files(obs, f) for f in nbm_files]
+    # # processed_df = pd.concat(processed_df, axis=0)
 
-    # Rename columns based on the mapping
-    processed_df.rename(columns=column_rename_mapping, inplace=True)
+    # # Rename columns based on the mapping
+    # processed_df.rename(columns=column_rename_mapping, inplace=True)
 
-    # Convert specified columns from Kelvin to Fahrenheit
-    columns_to_convert = ['t2m', 'tsfc', 'tapp']
-    processed_df = convert_kelvin_to_fahrenheit(processed_df, columns_to_convert)
+    # # Convert specified columns from Kelvin to Fahrenheit
+    # columns_to_convert = ['t2m', 'tsfc', 'tapp']
+    # processed_df = convert_kelvin_to_fahrenheit(processed_df, columns_to_convert)
 
-    processed_df.rename(columns={'observed_air_temp':'T', 'observed_wet_bulb_temp':'Tw', 'relative_humidity':'RH', 't2m':'FXT'}, inplace=True)
-    processed_df['snowlvl'] = processed_df['snowlvl'] * 3.28084 # m to ft
+    # processed_df.rename(columns={'observed_air_temp':'T', 'observed_wet_bulb_temp':'Tw', 'relative_humidity':'RH', 't2m':'FXT'}, inplace=True)
+    # processed_df['snowlvl'] = processed_df['snowlvl'] * 3.28084 # m to ft
 
-    subset = processed_df[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'PRA', 'PZR', 'PSN', 'PPL']]
+    # subset = processed_df[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'PRA', 'PZR', 'PSN', 'PPL']]
 
-    # Must drop NA before applying the Tw function
-    subset.dropna(how='any', inplace=True)
+    # # Must drop NA before applying the Tw function
+    # subset.dropna(how='any', inplace=True)
 
-    # Apply the Tw function to the dataframe
-    subset['FXTw'] = subset.apply(lambda row: calculate_wet_bulb_temperature(row['FXT'], row['FXRH']), axis=1)
-    subset = subset[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'FXTw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'PRA', 'PZR', 'PSN', 'PPL']]
+    # # Apply the Tw function to the dataframe
+    # subset['FXTw'] = subset.apply(lambda row: calculate_wet_bulb_temperature(row['FXT'], row['FXRH']), axis=1)
+    # subset = subset[['T', 'FXT', 'RH', 'FXRH', 'Tw', 'FXTw', 'elevation', 'snowlvl', 'RA', 'SN', 'ZR', 'PL', 'UP', 'PRA', 'PZR', 'PSN', 'PPL']]
 
-    subset = subset.apply(lambda col: col.round(2) if np.issubdtype(col.dtype, np.number) else col)
+    # subset = subset.apply(lambda col: col.round(2) if np.issubdtype(col.dtype, np.number) else col)
 
-    subset_file = f"{output_dir}/{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-nbm-obs.csv"
-    subset.to_csv(subset_file, index=True)
-    print(f"NBM/OBS Subset DataFrame saved to {subset_file}")
+    # subset_file = f"{output_dir}/{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-nbm-obs.csv"
+    # subset.to_csv(subset_file, index=True)
+    # print(f"NBM/OBS Subset DataFrame saved to {subset_file}")
+
+    # Add detailed logging
+    try:
+        logging.info("Starting column renaming based on the mapping.")
+        processed_df.rename(columns=column_rename_mapping, inplace=True)
+        logging.debug(f"Columns after renaming: {processed_df.columns}")
+
+        logging.info("Converting specified columns from Kelvin to Fahrenheit.")
+        columns_to_convert = ['t2m', 'tsfc', 'tapp']
+        logging.debug(f"Columns to convert: {columns_to_convert}")
+        processed_df = convert_kelvin_to_fahrenheit(processed_df, columns_to_convert)
+        logging.debug("Column conversion from Kelvin to Fahrenheit completed.")
+
+        logging.info("Renaming additional columns for consistency.")
+        processed_df.rename(
+            columns={
+                'observed_air_temp': 'T',
+                'observed_wet_bulb_temp': 'Tw',
+                'relative_humidity': 'RH',
+                't2m': 'FXT'
+            },
+            inplace=True
+        )
+        logging.debug(f"Columns after additional renaming: {processed_df.columns}")
+
+        logging.info("Converting snow level from meters to feet.")
+        processed_df['snowlvl'] = processed_df['snowlvl'] * 3.28084
+        logging.debug("Snow level conversion completed.")
+
+        logging.info("Creating a subset of the processed DataFrame.")
+        subset = processed_df[
+            ['T', 'FXT', 'RH', 'FXRH', 'Tw', 'elevation', 'snowlvl',
+            'RA', 'SN', 'ZR', 'PL', 'UP', 'PRA', 'PZR', 'PSN', 'PPL']
+        ]
+        logging.debug(f"Subset DataFrame columns: {subset.columns}")
+
+        logging.info("Dropping rows with NA values before applying the Tw function.")
+        subset.dropna(how='any', inplace=True)
+        logging.debug(f"Subset DataFrame shape after dropping NA: {subset.shape}")
+
+        logging.info("Applying calculate_wet_bulb_temperature function to the DataFrame.")
+        subset['FXTw'] = subset.apply(
+            lambda row: calculate_wet_bulb_temperature(row['FXT'], row['FXRH']),
+            axis=1
+        )
+        logging.debug("Wet-bulb temperature calculation completed.")
+
+        logging.info("Reorganizing and rounding numeric columns in the subset DataFrame.")
+        subset = subset[
+            ['T', 'FXT', 'RH', 'FXRH', 'Tw', 'FXTw', 'elevation', 'snowlvl',
+            'RA', 'SN', 'ZR', 'PL', 'UP', 'PRA', 'PZR', 'PSN', 'PPL']
+        ]
+        subset = subset.apply(
+            lambda col: col.round(2) if np.issubdtype(col.dtype, np.number) else col
+        )
+        logging.debug("Numeric columns rounded to 2 decimal places.")
+
+        logging.info("Saving the subset DataFrame to a CSV file.")
+        subset_file = f"{output_dir}/{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-nbm-obs.csv"
+        subset.to_csv(subset_file, index=True)
+        logging.info(f"Subset DataFrame saved to file: {subset_file}")
+
+    except Exception as e:
+        logging.error(f"An error occurred during the dataframe post-processing: {e}")
+        raise
