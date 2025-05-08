@@ -1,6 +1,7 @@
 # Standard library imports
 import os
 import gc
+import sys
 import time
 import json
 import zipfile
@@ -61,23 +62,34 @@ def mkdir_p(check_dir):
     Path(check_dir).mkdir(parents=True, exist_ok=True)
     return check_dir
 
+##########################
+# Command Line Arguments #
+##########################
+
+# Check if the correct number of arguments is provided
+if len(sys.argv) != 5:
+    print("Usage: python powt_archive_generator.py <start_date> <end_date> <lead_time_hours> <forecast_fequency>")
+    print("Example: python powt_archive_generator.py 2024-10-01 2024-10-10 48 6")
+    sys.exit(1)
+
+# Parse command-line arguments
+start_date = sys.argv[1]
+end_date = sys.argv[2]
+fhr = int(sys.argv[3])
+fhr_freq = int(sys.argv[4])
+
+# lead_days_selection = int(sys.argv[3]) // 24  # Convert lead time in hours to days
+# fhr = int(lead_days_selection) * 24
+
 #######################
 # User Configurations #
 #######################
 
-# Output directories
-output_dir = mkdir_p('/data/powt')
-
-# User token
+# Synoptic API token
 user_token = "a2386b75ecbc4c2784db1270695dde73"
 
-# Date range
-start_date = "2024-10-01"
-end_date = "2024-10-10"
-
-# Lead days selection
-lead_days_selection = 2
-fhr = int(lead_days_selection) * 24
+# Output directories
+output_dir = mkdir_p('/data/powt')
 
 # Region selection
 region_selection = "WR"  # Options: "WR", "SR", "CR", "ER", "CONUS", "CWA", "RFC"
@@ -873,7 +885,8 @@ if __name__ == "__main__":
             valid_datetime_iterable.append(iter_date.strftime('%Y%m%d') + end_hour)
 
             forecast_datetime_iterable.append(
-                    (iter_date-timedelta(days=lead_days_selection)
+                    # (iter_date-timedelta(days=lead_days_selection)
+                    (iter_date-timedelta(hours=fhr)
                 ).strftime('%Y%m%d') + end_hour)
 
         iter_date += timedelta(days=1)
@@ -989,10 +1002,10 @@ if __name__ == "__main__":
     # Process NBM Files #
     #####################
 
-    init_times = create_init_times(start_date, end_date, frequency=6)
+    init_times = create_init_times(start_date, end_date, frequency=fhr_freq)
 
-    temp_file = mkdir_p(f"{output_dir}/nbm/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-nbm-obs.TEMP.csv"
-    subset_file = mkdir_p(f"{output_dir}/nbm/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.powt-nbm-obs.csv"
+    temp_file = mkdir_p(f"{output_dir}/nbm/tmp/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.TEMP.csv"
+    subset_file = mkdir_p(f"{output_dir}/nbm/") + f"{cwa_reg_sel}_{start_date.strftime('%Y%m%d%H')}_{end_date.strftime('%Y%m%d%H')}.f{fhr:03d}_freq{fhr_freq:02d}.powt-nbm-obs.csv"
     
     if os.path.isfile(subset_file):
         subset = pd.read_csv(subset_file, index_col=[0, 1], parse_dates=[0])
@@ -1014,18 +1027,21 @@ if __name__ == "__main__":
             grib_index = grib_indexer(obs, nbm_files)
             obs = obs.join(grib_index[['grib_index', 'grib_lat', 'grib_lon']], on='stid')
 
-            while len(nbm_files) > 0:
-                print(f"{len(nbm_files)} NBM GRIB files remaining.")
+            successful_files = []
+            failed_files = []
 
-                # Take the next file from the list
-                nbm_file = nbm_files[0]
-                
+            for nbm_file in nbm_files[:]:  # Iterate over a copy of the list
+                print(f"Processing {nbm_file} (rem:{len(nbm_files)}).")
+
                 try:
                     # Call your function to process the file
                     obs, processed_file = process_grib_files(obs, nbm_file)
                     
+                    # Mark the file as successfully processed
+                    successful_files.append(nbm_file)
+                    
                     # Remove the processed file from the list
-                    nbm_files.pop(0)  # Remove the first file
+                    nbm_files.remove(nbm_file)  # Remove the current file
                     
                     # Optionally log or use the returned data
                     logging.info(f"Processed: {processed_file}")
@@ -1034,9 +1050,36 @@ if __name__ == "__main__":
                 except Exception as e:
                     # Handle errors gracefully
                     logging.error(f"Error processing {nbm_file}: {e}")
-                
+                    
+                    # Mark the file as failed
+                    failed_files.append(nbm_file)
+                    
                     # Optionally remove the file to avoid retrying it
-                    nbm_files.pop(0)
+                    nbm_files.remove(nbm_file)
+
+            # Retry failed files once
+            if failed_files:
+                logging.info(f"Retrying {len(failed_files)} failed files.")
+                for nbm_file in failed_files[:]:  # Iterate over a copy of the failed files list
+                    try:
+                        # Retry processing the file
+                        obs, processed_file = process_grib_files(obs, nbm_file)
+                        
+                        # Mark the file as successfully processed
+                        successful_files.append(nbm_file)
+                        
+                        # Remove the retried file from the failed list
+                        failed_files.remove(nbm_file)
+                        
+                        logging.info(f"Successfully retried: {processed_file}")
+                    except Exception as e:
+                        # Log the failure again if it still fails
+                        logging.error(f"Retry failed for {nbm_file}: {e}")
+
+            # Log final status
+            logging.info(f"Processing complete. {len(successful_files)} files processed successfully.")
+            if failed_files:
+                logging.warning(f"{len(failed_files)} files failed to process after retry: {failed_files}")
 
             obs.to_csv(temp_file, index=True)
             print('Saved', temp_file)
