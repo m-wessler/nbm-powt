@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import sys
 import traceback
-
+ 
 # Third-party library imports
 import numpy as np
 import pandas as pd
@@ -52,7 +52,7 @@ from pydantic import BaseModel, Field
 # Configure logging
 import logging
 logging.basicConfig(
-    filename='./process_grib_files.log',
+    filename='/nas/stid/projects/michael.wessler/nbm-powt/logs/archiver_debugging.log',
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
@@ -1017,7 +1017,7 @@ if __name__ == "__main__":
             print(f"File {temp_file} already exists.")
 
         else:
-            fetcher = NBMGribFetcher(aws_bucket_nbm, element, nbm_set, nbm_area, query_vars, output_dir+'/nbm_grib/')
+            fetcher = NBMGribFetcher(aws_bucket_nbm, element, nbm_set, nbm_area, query_vars, output_dir+'/nbm_grib')
             nbm_files = fetcher.fetch_for_init_times(init_times, fhr)
             
             nbm_files = sorted(nbm_files)
